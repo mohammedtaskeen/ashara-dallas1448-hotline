@@ -35,7 +35,7 @@ app.post("/voice/incoming", async (req, res) => {
   const callerNumber = req.body.From || "Unknown";
   const callSid = req.body.CallSid;
 
-  log("INCOMING", { callerNumber, callSid, body: req.body });
+  log("INCOMING", { callerNumber, callSid });
 
   let schedule;
   try {
@@ -44,7 +44,7 @@ app.post("/voice/incoming", async (req, res) => {
   } catch (err) {
     log("SCHEDULE_ERROR", { message: err.message });
     twiml.say(
-      { voice: "Polly.Joanna", language: "en-US" },
+      { voice: "Polly.Joanna" },
       "We're sorry, the medical hotline is temporarily unavailable. " +
         "For medical emergencies, please call 9 1 1."
     );
@@ -78,13 +78,52 @@ app.post("/voice/incoming", async (req, res) => {
     callerId: process.env.TWILIO_PHONE_NUMBER,
     record: "record-from-answer-dual",
     recordingStatusCallback: `${BASE_URL}/voice/recording-status`,
+    // answerOnBridge ensures the call isn't "answered" until the doctor
+    // actually speaks — prevents voicemail from hijacking the call
+    answerOnBridge: true,
   });
 
-  dial.number(schedule.primaryPhone);
+  // machineDetection: tell Twilio to hang up if it detects voicemail
+  // asyncAmdStatusCallback fires when detection is done without blocking call flow
+  dial.number(
+    {
+      machineDetection: "Enable",
+      asyncAmdStatusCallback: `${BASE_URL}/voice/amd-status?caller=${encodeURIComponent(callerNumber)}&callSid=${callSid}&leg=primary`,
+      asyncAmdStatusCallbackMethod: "POST",
+    },
+    schedule.primaryPhone
+  );
 
   const twimlStr = twiml.toString();
   log("TWIML_RESPONSE", { twiml: twimlStr });
   res.type("text/xml").send(twimlStr);
+});
+
+// ─── AMD (Answering Machine Detection) status ───────────────────────────────
+// Fires when Twilio determines if primary/backup was a human or machine
+app.post("/voice/amd-status", async (req, res) => {
+  const { caller, callSid, leg } = req.query;
+  const { AnsweredBy, CallSid: childCallSid } = req.body;
+
+  log("AMD_STATUS", { leg, caller, callSid, childCallSid, AnsweredBy, body: req.body });
+
+  // If voicemail detected — hang up the doctor leg so the action URL fires
+  if (AnsweredBy === "machine_start" || AnsweredBy === "machine_end_beep" ||
+      AnsweredBy === "machine_end_silence" || AnsweredBy === "machine_end_other" ||
+      AnsweredBy === "fax") {
+    log("AMD_STATUS", `Voicemail detected on ${leg} leg — hanging up doctor call`);
+    try {
+      const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      await client.calls(childCallSid).update({ status: "completed" });
+      log("AMD_STATUS", `Hung up ${leg} doctor leg ${childCallSid}`);
+    } catch (err) {
+      log("AMD_STATUS_ERROR", { message: err.message });
+    }
+  } else {
+    log("AMD_STATUS", `Human detected on ${leg} leg — call continues normally`);
+  }
+
+  res.sendStatus(204);
 });
 
 // ─── Primary doctor didn't answer → try backup ─────────────────────────────
@@ -93,19 +132,19 @@ app.post("/voice/primary-fallback", async (req, res) => {
   const dialStatus = req.body.DialCallStatus;
   const twiml = new VoiceResponse();
 
-  log("PRIMARY_FALLBACK", {
-    caller,
-    callSid,
-    dialStatus,
-    body: req.body,
-    query: req.query,
-  });
+  log("PRIMARY_FALLBACK", { caller, callSid, dialStatus });
 
-  if (dialStatus === "completed" || dialStatus === "answered") {
-    log("PRIMARY_FALLBACK", "Primary answered — hanging up");
+  // "completed" here now means hung up (either by timeout OR by AMD detecting voicemail)
+  // "answered" + DialBridged=true means human actually picked up
+  const humanAnswered = dialStatus === "completed" && req.body.DialBridged === "true";
+
+  if (humanAnswered) {
+    log("PRIMARY_FALLBACK", "Primary human answered — call was handled");
     twiml.hangup();
     return res.type("text/xml").send(twiml.toString());
   }
+
+  log("PRIMARY_FALLBACK", `Primary did not answer (status: ${dialStatus}) — trying backup`);
 
   let schedule;
   try {
@@ -136,8 +175,17 @@ app.post("/voice/primary-fallback", async (req, res) => {
       callerId: process.env.TWILIO_PHONE_NUMBER,
       record: "record-from-answer-dual",
       recordingStatusCallback: `${BASE_URL}/voice/recording-status`,
+      answerOnBridge: true,
     });
-    dial.number(schedule.backupPhone);
+
+    dial.number(
+      {
+        machineDetection: "Enable",
+        asyncAmdStatusCallback: `${BASE_URL}/voice/amd-status?caller=${encodeURIComponent(caller)}&callSid=${callSid}&leg=backup`,
+        asyncAmdStatusCallbackMethod: "POST",
+      },
+      schedule.backupPhone
+    );
   } else {
     log("ROUTING", "No backup phone — going to coordinator fallback");
     twiml.redirect(
@@ -156,16 +204,12 @@ app.post("/voice/backup-fallback", async (req, res) => {
   const dialStatus = req.body.DialCallStatus;
   const twiml = new VoiceResponse();
 
-  log("BACKUP_FALLBACK", {
-    caller,
-    callSid,
-    dialStatus,
-    body: req.body,
-    query: req.query,
-  });
+  log("BACKUP_FALLBACK", { caller, callSid, dialStatus, DialBridged: req.body.DialBridged });
 
-  if (dialStatus === "completed" || dialStatus === "answered") {
-    log("BACKUP_FALLBACK", "Backup answered — hanging up");
+  const humanAnswered = dialStatus === "completed" && req.body.DialBridged === "true";
+
+  if (humanAnswered) {
+    log("BACKUP_FALLBACK", "Backup human answered — call was handled");
     twiml.hangup();
     return res.type("text/xml").send(twiml.toString());
   }
