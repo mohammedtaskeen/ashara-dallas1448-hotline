@@ -18,6 +18,7 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 
 // ─── Config ────────────────────────────────────────────────────────────────
 const RING_TIMEOUT_SECONDS = parseInt(process.env.RING_TIMEOUT_SECONDS || "25");
+const BASE_URL = process.env.BASE_URL || "";
 const DISCLAIMER =
   process.env.DISCLAIMER_MESSAGE ||
   "For medical emergencies, please call 9 1 1. " +
@@ -47,23 +48,21 @@ app.post("/voice/incoming", async (req, res) => {
   }
 
   if (!schedule || !schedule.primaryPhone) {
-    // No one scheduled — go straight to voicemail
     twiml.say({ voice: "Polly.Joanna" }, DISCLAIMER);
     twiml.redirect(
-      `/voice/voicemail?caller=${encodeURIComponent(callerNumber)}&callSid=${callSid}&reason=no_schedule`
+      `${BASE_URL}/voice/voicemail?caller=${encodeURIComponent(callerNumber)}&callSid=${callSid}&reason=no_schedule`
     );
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // Play disclaimer then dial primary doctor
   twiml.say({ voice: "Polly.Joanna" }, DISCLAIMER);
 
   const dial = twiml.dial({
-    action: `/voice/primary-fallback?caller=${encodeURIComponent(callerNumber)}&callSid=${callSid}`,
+    action: `${BASE_URL}/voice/primary-fallback?caller=${encodeURIComponent(callerNumber)}&callSid=${callSid}`,
     timeout: RING_TIMEOUT_SECONDS,
-    callerId: process.env.TWILIO_PHONE_NUMBER, // Hides doctor's real number
+    callerId: process.env.TWILIO_PHONE_NUMBER,
     record: "record-from-answer-dual",
-    recordingStatusCallback: `/voice/recording-status`,
+    recordingStatusCallback: `${BASE_URL}/voice/recording-status`,
   });
 
   dial.number(schedule.primaryPhone);
@@ -80,12 +79,10 @@ app.post("/voice/primary-fallback", async (req, res) => {
   console.log(`[${new Date().toISOString()}] Primary dial status: ${dialStatus}`);
 
   if (dialStatus === "completed" || dialStatus === "answered") {
-    // Primary answered — call is done, logging handled by status callback
     twiml.hangup();
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // Primary didn't answer — try backup
   let schedule;
   try {
     schedule = await getOnCallSchedule();
@@ -100,17 +97,16 @@ app.post("/voice/primary-fallback", async (req, res) => {
     );
 
     const dial = twiml.dial({
-      action: `/voice/backup-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}`,
+      action: `${BASE_URL}/voice/backup-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}`,
       timeout: RING_TIMEOUT_SECONDS,
       callerId: process.env.TWILIO_PHONE_NUMBER,
       record: "record-from-answer-dual",
-      recordingStatusCallback: `/voice/recording-status`,
+      recordingStatusCallback: `${BASE_URL}/voice/recording-status`,
     });
     dial.number(schedule.backupPhone);
   } else {
-    // No backup configured — go to coordinator or voicemail
     twiml.redirect(
-      `/voice/coordinator-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=primary_unavailable`
+      `${BASE_URL}/voice/coordinator-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=primary_unavailable`
     );
   }
 
@@ -131,7 +127,7 @@ app.post("/voice/backup-fallback", async (req, res) => {
   }
 
   twiml.redirect(
-    `/voice/coordinator-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=both_unavailable`
+    `${BASE_URL}/voice/coordinator-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=both_unavailable`
   );
   res.type("text/xml").send(twiml.toString());
 });
@@ -151,14 +147,14 @@ app.post("/voice/coordinator-fallback", async (req, res) => {
   if (schedule?.coordinatorPhone) {
     twiml.say({ voice: "Polly.Joanna" }, "Connecting you to a coordinator.");
     const dial = twiml.dial({
-      action: `/voice/voicemail?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`,
+      action: `${BASE_URL}/voice/voicemail?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`,
       timeout: RING_TIMEOUT_SECONDS,
       callerId: process.env.TWILIO_PHONE_NUMBER,
     });
     dial.number(schedule.coordinatorPhone);
   } else {
     twiml.redirect(
-      `/voice/voicemail?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`
+      `${BASE_URL}/voice/voicemail?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`
     );
   }
 
@@ -181,10 +177,10 @@ app.post("/voice/voicemail", async (req, res) => {
   );
 
   twiml.record({
-    action: `/voice/voicemail-done?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`,
+    action: `${BASE_URL}/voice/voicemail-done?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`,
     maxLength: 120,
     playBeep: true,
-    recordingStatusCallback: `/voice/recording-status`,
+    recordingStatusCallback: `${BASE_URL}/voice/recording-status`,
   });
 
   res.type("text/xml").send(twiml.toString());
@@ -201,7 +197,6 @@ app.post("/voice/voicemail-done", async (req, res) => {
   );
   twiml.hangup();
 
-  // Log missed call and send SMS notification
   try {
     const schedule = await getOnCallSchedule().catch(() => null);
     await logCall({
@@ -220,7 +215,7 @@ app.post("/voice/voicemail-done", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-// ─── Call status callback (answered calls) ─────────────────────────────────
+// ─── Call status callback ───────────────────────────────────────────────────
 app.post("/voice/status", async (req, res) => {
   const { CallStatus, From, CallDuration, CallSid } = req.body;
 
@@ -266,9 +261,8 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// ─── Current schedule preview (for admins) ─────────────────────────────────
+// ─── Current schedule preview (admin only) ─────────────────────────────────
 app.get("/schedule/current", async (req, res) => {
-  // Simple token auth to protect this endpoint
   const token = req.query.token;
   if (token !== process.env.ADMIN_TOKEN) {
     return res.status(401).json({ error: "Unauthorized" });
