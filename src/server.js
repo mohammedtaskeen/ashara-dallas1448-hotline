@@ -6,7 +6,7 @@
 require("dotenv").config();
 const express = require("express");
 const twilio = require("twilio");
-const { getOnCallSchedule } = require("./schedule");
+const { getOnCallSchedule, getDebugInfo } = require("./schedule");
 const { logCall } = require("./callLog");
 const { sendMissedCallSMS } = require("./notifications");
 
@@ -245,6 +245,20 @@ app.post("/voice/status", async (req, res) => {
 app.post("/voice/recording-status", (req, res) => {
   console.log(`Recording ready: ${req.body.RecordingUrl}`);
   res.sendStatus(204);
+});
+
+// ─── Debug endpoint (admin only) ────────────────────────────────────────────
+app.get("/schedule/debug", async (req, res) => {
+  const token = req.query.token;
+  if (token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  try {
+    const debug = await getDebugInfo();
+    res.json(debug);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Health check ───────────────────────────────────────────────────────────
