@@ -1,4 +1,4 @@
-# Ashara Community Medical Hotline
+# Ashara 1448 - Dallas Relay Center Medical Hotline
 
 A dedicated phone hotline for the Ashara community to reach an on-call doctor for non-emergency medical guidance. Calls are automatically routed based on a schedule maintained in Google Sheets — no coding or IT involvement required for day-to-day operations.
 
