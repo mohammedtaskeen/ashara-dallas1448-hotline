@@ -1,0 +1,22 @@
+{
+  "name": "ashara-medical-hotline",
+  "version": "1.0.0",
+  "description": "Ashara Community Medical Hotline — Twilio + Google Sheets call routing",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "googleapis": "^140.0.0",
+    "twilio": "^5.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
