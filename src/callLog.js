@@ -3,12 +3,12 @@
  * Appends call records to a "Call Log" tab in the same Google Sheet.
  *
  * Log sheet columns:
- *   A: Timestamp
+ *   A: Timestamp (in local timezone)
  *   B: Caller Number (masked)
- *   C: Outcome (answered / voicemail / missed)
- *   D: Doctor Who Answered
+ *   C: Outcome (answered / missed)
+ *   D: Doctor
  *   E: Call Duration (seconds)
- *   F: Reason (e.g., both_unavailable) — only set for voicemail/missed calls
+ *   F: Reason (for missed calls only)
  *   G: Call SID
  */
 
@@ -16,6 +16,26 @@ const { google } = require("googleapis");
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const LOG_SHEET_NAME = process.env.GOOGLE_LOG_SHEET_NAME || "Call Log";
+
+/**
+ * Formats a timestamp in the configured local timezone.
+ * e.g., "06/05/2026, 2:51:00 PM CDT"
+ */
+function formatTimestamp(isoString) {
+  const tz = process.env.TIMEZONE || "America/Chicago";
+  const date = isoString ? new Date(isoString) : new Date();
+  return date.toLocaleString("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  });
+}
 
 async function logCall({ caller, callSid, timestamp, outcome, duration, reason, primaryDoctor, backupDoctor }) {
   try {
@@ -30,8 +50,8 @@ async function logCall({ caller, callSid, timestamp, outcome, duration, reason, 
       requestBody: {
         values: [
           [
-            timestamp || new Date().toISOString(),
-            maskPhone(caller),   // prefixed with ' so Sheets treats as plain text
+            formatTimestamp(timestamp),
+            maskPhone(caller),
             outcome || "",
             primaryDoctor || "",
             duration || "",
@@ -42,9 +62,8 @@ async function logCall({ caller, callSid, timestamp, outcome, duration, reason, 
       },
     });
 
-    console.log(`[callLog] Logged: ${outcome} from ${maskPhone(caller)}`);
+    console.log(`[callLog] Logged: ${outcome} from ${maskPhone(caller)} at ${formatTimestamp(timestamp)}`);
   } catch (err) {
-    // Non-fatal — don't let logging failures break call routing
     console.error("[callLog] Failed to log call:", err.message);
   }
 }
