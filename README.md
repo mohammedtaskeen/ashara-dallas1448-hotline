@@ -9,19 +9,21 @@ A dedicated phone hotline for the Ashara community to reach an on-call doctor fo
 Community members dial one dedicated phone number. The system plays a short disclaimer, then automatically connects the caller to the doctor currently on duty. If the primary doctor doesn't answer, it tries the backup doctor. If neither is available, the caller is routed to a coordinator or voicemail, and an SMS alert is sent immediately.
 
 ```
-Caller dials hotline
-        ↓
+Caller dials
+      ↓
 Disclaimer plays
-        ↓
-System reads today's schedule from Google Sheet
-        ↓
-Rings primary doctor (25 seconds)
-        ↓ no answer
-Rings backup doctor (25 seconds)
-        ↓ no answer
-Rings coordinator (if assigned)
-        ↓ no answer
-Voicemail + SMS alert sent to coordinators
+      ↓
+Primary doctor rings (25 sec) ← hangs up if voicemail detected
+      ↓ no answer
+Backup doctor rings (25 sec) ← hangs up if voicemail detected
+      ↓ no answer
+Coordinator rings (25 sec)
+      ↓ no answer
+Polite goodbye message plays + SMS sent instantly:
+
+"The number +1-469-XXX-XXXX called Ashara 1448 Dallas Relay Center 
+Hotline & could not connect to any of the doctors. Please follow up 
+to check if any assistance is needed."
 ```
 
 Doctor phone numbers are never revealed to callers. All calls display the hotline number as the caller ID.
