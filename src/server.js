@@ -1,9 +1,10 @@
 /**
  * Ashara Community Medical Hotline
  * Twilio + Google Sheets call routing server
- * 
+ *
  * Call flow:
- * Incoming → Primary Doctor → Backup Doctor → Coordinator → SMS alert (no voicemail)
+ * Incoming → Primary Doctor (press 1 to accept) → Backup Doctor → Coordinator → SMS alert
+ * Voicemail is completely bypassed via whisper confirmation.
  */
 
 require("dotenv").config();
@@ -20,7 +21,7 @@ app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
 // ─── Config ────────────────────────────────────────────────────────────────
-const RING_TIMEOUT_SECONDS = parseInt(process.env.RING_TIMEOUT_SECONDS || "25");
+const RING_TIMEOUT_SECONDS = parseInt(process.env.RING_TIMEOUT_SECONDS || "20");
 const BASE_URL = process.env.BASE_URL || "";
 const DISCLAIMER =
   process.env.DISCLAIMER_MESSAGE ||
@@ -65,15 +66,17 @@ app.post("/voice/incoming", async (req, res) => {
     );
     twiml.hangup();
 
-    // Still send SMS so coordinators know someone called
-    await sendMissedCallSMS({ caller: callerNumber, reason: "no_schedule", schedule: null });
-    await logCall({
-      caller: callerNumber,
-      callSid,
-      timestamp: new Date().toISOString(),
-      outcome: "missed",
-      reason: "no_schedule",
+    setImmediate(async () => {
+      await sendMissedCallSMS({ caller: callerNumber, reason: "no_schedule", schedule: null });
+      await logCall({
+        caller: callerNumber,
+        callSid,
+        timestamp: new Date().toISOString(),
+        outcome: "missed",
+        reason: "no_schedule",
+      });
     });
+
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -92,15 +95,12 @@ app.post("/voice/incoming", async (req, res) => {
     action: actionUrl,
     timeout: RING_TIMEOUT_SECONDS,
     callerId: process.env.TWILIO_PHONE_NUMBER,
-    answerOnBridge: true,
   });
 
+  // url= is the whisper: plays ONLY to the doctor when they pick up,
+  // before the two parties are bridged together
   dial.number(
-    {
-      machineDetection: "Enable",
-      asyncAmdStatusCallback: `${BASE_URL}/voice/amd-status?caller=${encodeURIComponent(callerNumber)}&callSid=${callSid}&leg=primary`,
-      asyncAmdStatusCallbackMethod: "POST",
-    },
+    { url: `${BASE_URL}/voice/whisper?leg=primary` },
     schedule.primaryPhone
   );
 
@@ -108,47 +108,78 @@ app.post("/voice/incoming", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-// ─── AMD (Answering Machine Detection) ─────────────────────────────────────
-app.post("/voice/amd-status", async (req, res) => {
-  const { caller, callSid, leg } = req.query;
-  const { AnsweredBy, CallSid: childCallSid } = req.body;
+// ─── Whisper — plays to the DOCTOR before connecting ───────────────────────
+// The caller hears hold music. The doctor hears this prompt.
+// If doctor presses 1 → call bridges. Anything else or no input → hangs up
+// doctor leg, which triggers the <Dial action> fallback.
+app.post("/voice/whisper", (req, res) => {
+  const { leg } = req.query;
+  const twiml = new VoiceResponse();
 
-  log("AMD_STATUS", { leg, caller, callSid, childCallSid, AnsweredBy });
+  log("WHISPER", { leg, body: req.body });
 
-  const isVoicemail = ["machine_start", "machine_end_beep", "machine_end_silence",
-                       "machine_end_other", "fax"].includes(AnsweredBy);
+  // <Gather> waits for doctor to press a key
+  const gather = twiml.gather({
+    numDigits: 1,
+    action: `${BASE_URL}/voice/whisper-response?leg=${leg}`,
+    method: "POST",
+    timeout: 10, // seconds to wait for key press
+  });
 
-  if (isVoicemail) {
-    log("AMD_STATUS", `Voicemail detected on ${leg} — hanging up doctor leg`);
-    try {
-      const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-      await client.calls(childCallSid).update({ status: "completed" });
-    } catch (err) {
-      log("AMD_STATUS_ERROR", { message: err.message });
-    }
-  } else {
-    log("AMD_STATUS", `Human detected on ${leg} — call continues`);
-  }
+  gather.say(
+    { voice: "Polly.Joanna" },
+    "You have an incoming call on the Ashara Medical Hotline. " +
+      "Press 1 to accept and connect to the caller. " +
+      "Press any other key or hang up to decline."
+  );
 
-  res.sendStatus(204);
+  // If no key pressed within timeout, hang up this leg
+  // This triggers the <Dial action> fallback to try the next doctor
+  twiml.hangup();
+
+  log("WHISPER_TWIML", { twiml: twiml.toString() });
+  res.type("text/xml").send(twiml.toString());
 });
 
-// ─── Primary didn't answer → try backup ────────────────────────────────────
+// ─── Whisper response — doctor pressed a key ───────────────────────────────
+app.post("/voice/whisper-response", (req, res) => {
+  const { leg } = req.query;
+  const digit = req.body.Digits;
+  const twiml = new VoiceResponse();
+
+  log("WHISPER_RESPONSE", { leg, digit });
+
+  if (digit === "1") {
+    // Doctor accepted — bridge the call
+    log("WHISPER_RESPONSE", `${leg} doctor accepted the call`);
+    twiml.say({ voice: "Polly.Joanna" }, "Connecting you now.");
+  } else {
+    // Doctor declined — hang up this leg, triggers <Dial action> fallback
+    log("WHISPER_RESPONSE", `${leg} doctor declined (pressed ${digit}) — hanging up`);
+    twiml.hangup();
+  }
+
+  res.type("text/xml").send(twiml.toString());
+});
+
+// ─── Primary didn't accept → try backup ────────────────────────────────────
 app.post("/voice/primary-fallback", async (req, res) => {
   const { caller, callSid } = req.query;
   const dialStatus = req.body.DialCallStatus;
-  const humanAnswered = dialStatus === "completed" && req.body.DialBridged === "true";
   const twiml = new VoiceResponse();
 
   log("PRIMARY_FALLBACK", { caller, callSid, dialStatus, DialBridged: req.body.DialBridged });
 
-  if (humanAnswered) {
-    log("PRIMARY_FALLBACK", "Primary answered — call complete");
+  // DialBridged=true AND status=completed means whisper completed and doctor accepted
+  const doctorAccepted = req.body.DialBridged === "true";
+
+  if (doctorAccepted) {
+    log("PRIMARY_FALLBACK", "Primary accepted the call — complete");
     twiml.hangup();
     return res.type("text/xml").send(twiml.toString());
   }
 
-  log("PRIMARY_FALLBACK", "Primary did not answer — trying backup");
+  log("PRIMARY_FALLBACK", `Primary did not accept (${dialStatus}) — trying backup`);
 
   let schedule;
   try {
@@ -174,19 +205,13 @@ app.post("/voice/primary-fallback", async (req, res) => {
       action: actionUrl,
       timeout: RING_TIMEOUT_SECONDS,
       callerId: process.env.TWILIO_PHONE_NUMBER,
-      answerOnBridge: true,
     });
 
     dial.number(
-      {
-        machineDetection: "Enable",
-        asyncAmdStatusCallback: `${BASE_URL}/voice/amd-status?caller=${encodeURIComponent(caller)}&callSid=${callSid}&leg=backup`,
-        asyncAmdStatusCallbackMethod: "POST",
-      },
+      { url: `${BASE_URL}/voice/whisper?leg=backup` },
       schedule.backupPhone
     );
   } else {
-    // No backup — go straight to coordinator or SMS
     twiml.redirect(
       `${BASE_URL}/voice/coordinator-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=primary_unavailable`
     );
@@ -196,22 +221,23 @@ app.post("/voice/primary-fallback", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-// ─── Backup didn't answer → try coordinator ────────────────────────────────
+// ─── Backup didn't accept → try coordinator ─────────────────────────────────
 app.post("/voice/backup-fallback", async (req, res) => {
   const { caller, callSid } = req.query;
   const dialStatus = req.body.DialCallStatus;
-  const humanAnswered = dialStatus === "completed" && req.body.DialBridged === "true";
   const twiml = new VoiceResponse();
 
   log("BACKUP_FALLBACK", { caller, callSid, dialStatus, DialBridged: req.body.DialBridged });
 
-  if (humanAnswered) {
-    log("BACKUP_FALLBACK", "Backup answered — call complete");
+  const doctorAccepted = req.body.DialBridged === "true";
+
+  if (doctorAccepted) {
+    log("BACKUP_FALLBACK", "Backup accepted the call — complete");
     twiml.hangup();
     return res.type("text/xml").send(twiml.toString());
   }
 
-  log("BACKUP_FALLBACK", "Backup did not answer — trying coordinator");
+  log("BACKUP_FALLBACK", "Backup did not accept — trying coordinator");
 
   twiml.redirect(
     `${BASE_URL}/voice/coordinator-fallback?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=both_unavailable`
@@ -250,12 +276,11 @@ app.post("/voice/coordinator-fallback", async (req, res) => {
       action: actionUrl,
       timeout: RING_TIMEOUT_SECONDS,
       callerId: process.env.TWILIO_PHONE_NUMBER,
-      answerOnBridge: true,
     });
 
+    // No whisper for coordinator — they just pick up normally
     dial.number(schedule.coordinatorPhone);
   } else {
-    // No coordinator configured — go straight to all-unavailable
     twiml.redirect(
       `${BASE_URL}/voice/all-unavailable?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`
     );
@@ -264,22 +289,20 @@ app.post("/voice/coordinator-fallback", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-// ─── All unavailable — no voicemail, just SMS + polite goodbye ─────────────
+// ─── All unavailable — goodbye + SMS ───────────────────────────────────────
 app.post("/voice/all-unavailable", async (req, res) => {
   const { caller, callSid, reason } = req.query;
-  const dialStatus = req.body.DialCallStatus;
-  const humanAnswered = dialStatus === "completed" && req.body.DialBridged === "true";
   const twiml = new VoiceResponse();
 
-  log("ALL_UNAVAILABLE", { caller, callSid, reason, dialStatus, DialBridged: req.body.DialBridged });
+  log("ALL_UNAVAILABLE", { caller, callSid, reason, DialBridged: req.body.DialBridged });
 
-  if (humanAnswered) {
+  // Check if coordinator actually answered
+  if (req.body.DialBridged === "true") {
     log("ALL_UNAVAILABLE", "Coordinator answered — call complete");
     twiml.hangup();
     return res.type("text/xml").send(twiml.toString());
   }
 
-  // Nobody answered — say goodbye, send SMS, log it
   log("ALL_UNAVAILABLE", "No one answered — sending SMS alert");
 
   twiml.say(
@@ -291,7 +314,6 @@ app.post("/voice/all-unavailable", async (req, res) => {
   );
   twiml.hangup();
 
-  // Fire SMS and log asynchronously — don't hold up the call
   setImmediate(async () => {
     try {
       const schedule = await getOnCallSchedule().catch(() => null);
@@ -318,7 +340,7 @@ app.post("/voice/status", async (req, res) => {
   const { CallStatus, From, CallDuration, CallSid } = req.body;
   log("CALL_STATUS", { CallStatus, From, CallDuration, CallSid });
 
-  if (CallStatus === "completed" && CallDuration > 10) {
+  if (CallStatus === "completed" && parseInt(CallDuration) > 10) {
     try {
       await logCall({
         caller: From,
