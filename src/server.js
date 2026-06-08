@@ -298,12 +298,21 @@ app.post("/voice/status", async (req, res) => {
   } else if (CallStatus === "completed" && duration >= MIN_CALL_DURATION) {
     // Normal completed call — log it
     try {
+      const state = callState[CallSid];
+      const schedule = await getOnCallSchedule().catch(() => null);
+      const leg = state?.leg || "primary";
+      const doctorName = leg === "backup"
+        ? (schedule?.backupName || "Backup Doctor")
+        : leg === "coordinator"
+        ? (schedule?.coordinatorName || "Coordinator")
+        : (schedule?.primaryName || "Primary Doctor");
       await logCall({
         caller: From,
         callSid: CallSid,
         timestamp: new Date().toISOString(),
         outcome: "answered",
         duration: CallDuration,
+        primaryDoctor: doctorName,
       });
     } catch (err) {
       log("CALL_STATUS_ERROR", { message: err.message });

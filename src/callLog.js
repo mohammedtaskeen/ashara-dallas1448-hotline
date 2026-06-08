@@ -3,12 +3,12 @@
  * Appends call records to a "Call Log" tab in the same Google Sheet.
  *
  * Log sheet columns:
- *   A: Timestamp (in local timezone)
- *   B: Caller Number (masked)
+ *   A: Timestamp (local timezone)
+ *   B: Caller Number (full number)
  *   C: Outcome (answered / missed)
- *   D: Doctor
+ *   D: Doctor Answered
  *   E: Call Duration (seconds)
- *   F: Reason (for missed calls only)
+ *   F: Reason (missed calls only: no_schedule / primary_unavailable / both_unavailable / all_unavailable)
  *   G: Call SID
  */
 
@@ -19,7 +19,7 @@ const LOG_SHEET_NAME = process.env.GOOGLE_LOG_SHEET_NAME || "Call Log";
 
 /**
  * Formats a timestamp in the configured local timezone.
- * e.g., "06/05/2026, 2:51:00 PM CDT"
+ * e.g., "06/07/2026, 11:27:12 PM CDT"
  */
 function formatTimestamp(isoString) {
   const tz = process.env.TIMEZONE || "America/Chicago";
@@ -37,10 +37,49 @@ function formatTimestamp(isoString) {
   });
 }
 
+/**
+ * Formats a phone number for readability.
+ * +14691234567 → +1-469-123-4567
+ * Prefixed with apostrophe to prevent Google Sheets treating it as a formula.
+ */
+function formatPhone(phone) {
+  if (!phone || phone === "Unknown") return phone;
+  const digits = phone.replace(/\D/g, "");
+  let formatted;
+  if (digits.length === 11 && digits.startsWith("1")) {
+    formatted = `+1-${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7)}`;
+  } else if (digits.length === 10) {
+    formatted = `+1-${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+  } else {
+    formatted = phone;
+  }
+  // Apostrophe prefix prevents Sheets from misinterpreting the + sign
+  return `'${formatted}`;
+}
+
+/**
+ * Human-readable reason labels for the log.
+ */
+const REASON_LABELS = {
+  no_schedule:               "No doctor scheduled",
+  primary_unavailable:       "Primary did not answer",
+  both_unavailable:          "Primary & backup did not answer",
+  all_unavailable:           "All doctors & coordinator unavailable",
+  backup_disconnected:       "Backup call disconnected",
+  disconnected_all_unavailable: "Disconnected — no one else available",
+};
+
 async function logCall({ caller, callSid, timestamp, outcome, duration, reason, primaryDoctor, backupDoctor }) {
   try {
     const auth = await getGoogleAuth();
     const sheets = google.sheets({ version: "v4", auth });
+
+    const reasonLabel = reason ? (REASON_LABELS[reason] || reason) : "";
+    const doctorLabel = primaryDoctor
+      ? backupDoctor && outcome === "answered"
+        ? primaryDoctor  // show who answered
+        : primaryDoctor
+      : "";
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
@@ -51,33 +90,21 @@ async function logCall({ caller, callSid, timestamp, outcome, duration, reason, 
         values: [
           [
             formatTimestamp(timestamp),
-            maskPhone(caller),
+            formatPhone(caller),
             outcome || "",
-            primaryDoctor || "",
-            duration || "",
-            reason || "",
+            doctorLabel,
+            duration ? `${duration}s` : "",
+            reasonLabel,
             callSid || "",
           ],
         ],
       },
     });
 
-    console.log(`[callLog] Logged: ${outcome} from ${maskPhone(caller)} at ${formatTimestamp(timestamp)}`);
+    console.log(`[callLog] Logged: ${outcome} from ${formatPhone(caller)} at ${formatTimestamp(timestamp)}`);
   } catch (err) {
     console.error("[callLog] Failed to log call:", err.message);
   }
-}
-
-/**
- * Masks caller number for privacy — keeps last 4 digits only.
- * The leading apostrophe (') tells Google Sheets to treat the value
- * as plain text, preventing the #ERROR! caused by * characters.
- * e.g., +12135550199 → '***-***-0199
- */
-function maskPhone(phone) {
-  if (!phone || phone === "Unknown") return phone;
-  const last4 = phone.slice(-4);
-  return `'***-***-${last4}`;
 }
 
 async function getGoogleAuth() {
