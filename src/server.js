@@ -409,8 +409,13 @@ async function dialCoordinator({ caller, callSid, twiml, reason }) {
       action: `${BASE_URL}/voice/all-unavailable?caller=${encodeURIComponent(caller)}&callSid=${callSid}&reason=${reason}`,
       timeout: RING_TIMEOUT_SECONDS,
       callerId: process.env.TWILIO_PHONE_NUMBER,
+      answerOnBridge: true,
     });
-    dial.number(schedule.coordinatorPhone);
+    // Coordinator also uses whisper to prevent their voicemail from intercepting
+    dial.number(
+      { url: `${BASE_URL}/voice/whisper?leg=coordinator` },
+      schedule.coordinatorPhone
+    );
     log("ROUTING", { action: "dialing_coordinator", coordinatorName: schedule.coordinatorName });
   } else {
     twiml.redirect(
@@ -422,10 +427,9 @@ async function dialCoordinator({ caller, callSid, twiml, reason }) {
 function playGoodbye(twiml) {
   twiml.say(
     { voice: "Polly.Joanna" },
-    "We're sorry, all of our doctors and coordinators are currently unavailable. " +
-      "Someone will follow up with you as soon as possible. " +
-      "If this is a medical emergency, please hang up and call 9 1 1. " +
-      "Thank you for calling Ashara Relay Center. Goodbye."
+    "We are sorry that nobody was available to take your call. " +
+      "We will call you back as soon as possible. " +
+      "If this is a medical emergency, please hang up and call 9 1 1. Goodbye."
   );
   twiml.hangup();
 }
