@@ -411,11 +411,8 @@ async function dialCoordinator({ caller, callSid, twiml, reason }) {
       callerId: process.env.TWILIO_PHONE_NUMBER,
       answerOnBridge: true,
     });
-    // Coordinator also uses whisper to prevent their voicemail from intercepting
-    dial.number(
-      { url: `${BASE_URL}/voice/whisper?leg=coordinator` },
-      schedule.coordinatorPhone
-    );
+    // Coordinator connects directly — no whisper needed
+    dial.number(schedule.coordinatorPhone);
     log("ROUTING", { action: "dialing_coordinator", coordinatorName: schedule.coordinatorName });
   } else {
     twiml.redirect(
